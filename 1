@@ -1,0 +1,235 @@
+// ==UserScript==
+// @name         Tucao视频链接复制悬浮窗 (动态查找版)
+// @namespace    http://tampermonkey.net/
+// @version      2.1
+// @description  在tucao网站页面动态查找并复制视频链接
+// @author       无月何水
+// @match        https://www.tucao.my/*
+// @grant        GM_addStyle
+// @grant        GM_notification
+// @grant        GM_setClipboard
+// @run-at       document-end
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // 添加悬浮窗CSS样式（与之前保持一致）
+    GM_addStyle(`
+        .tucao-floating-btn {
+            position: fixed;
+            right: 20px;
+            bottom: 20px;
+            width: 50px;
+            height: 50px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            font-size: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 999999;
+            transition: all 0.3s ease;
+            user-select: none;
+            overflow: hidden;
+        }
+        .tucao-floating-btn:hover {
+            transform: scale(1.1);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.4);
+        }
+        .tucao-floating-btn:active {
+            transform: scale(0.95);
+        }
+        .tucao-copy-notification {
+            position: fixed;
+            right: 80px;
+            bottom: 20px;
+            background: linear-gradient(135deg, #4CAF50 0%, #2E7D32 100%);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 25px;
+            font-size: 14px;
+            font-weight: 500;
+            z-index: 1000000;
+            opacity: 0;
+            transform: translateX(20px);
+            transition: all 0.3s ease;
+            pointer-events: none;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            white-space: nowrap;
+        }
+        .tucao-copy-notification.show {
+            opacity: 1;
+            transform: translateX(0);
+        }
+        .tucao-copy-notification.error {
+            background: linear-gradient(135deg, #f44336 0%, #c62828 100%);
+        }
+    `);
+
+    // 主初始化函数
+    function init() {
+        // 创建悬浮窗
+        createFloatingButton();
+    }
+
+    function createFloatingButton() {
+        // 检查是否已存在按钮
+        if (document.querySelector('.tucao-floating-btn')) return;
+
+        // 创建按钮
+        const button = document.createElement('button');
+        button.className = 'tucao-floating-btn';
+        button.title = '点击复制视频链接';
+        button.innerHTML = '🔗';
+
+        // 创建提示消息
+        const notification = document.createElement('div');
+        notification.className = 'tucao-copy-notification';
+        notification.textContent = '链接已复制到剪贴板！';
+
+        // 添加到页面
+        document.body.appendChild(button);
+        document.body.appendChild(notification);
+
+        // 点击事件处理
+        button.addEventListener('click', async function() {
+            const videoUrl = findVideoUrl();
+
+            if (!videoUrl) {
+                showNotification(notification, '❌ 未找到可用的视频链接', 'error');
+                return;
+            }
+
+            try {
+                // 复制到剪贴板
+                await GM_setClipboard(videoUrl, 'text');
+
+                // 显示成功提示
+                showNotification(notification, '✅ 视频链接已复制！');
+
+                // 按钮反馈动画
+                button.innerHTML = '✅';
+                button.style.background = 'linear-gradient(135deg, #4CAF50 0%, #2E7D32 100%)';
+
+                setTimeout(() => {
+                    button.innerHTML = '🔗';
+                    button.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+                }, 1000);
+
+            } catch (error) {
+                console.error('复制失败:', error);
+                showNotification(notification, '❌ 复制失败，请手动选择复制', 'error');
+            }
+        });
+    }
+
+    // **核心：动态查找视频链接的函数**
+    function findVideoUrl() {
+        let videoUrl = '';
+        const debug = false; // 设置为true可在控制台查看查找过程
+
+        // 策略1：直接查找所有video元素
+        const videoElements = document.querySelectorAll('video');
+        if (debug) console.log(`找到 ${videoElements.length} 个video元素`);
+
+        for (const video of videoElements) {
+            if (video.src && video.src.trim() !== '' && !video.src.startsWith('blob:')) {
+                videoUrl = video.src;
+                if (debug) console.log('策略1成功: 从video元素找到', videoUrl);
+                return videoUrl;
+            }
+        }
+
+        // 策略2：查找具有特定class的video（针对DPlayer播放器）
+        const dplayerVideo = document.querySelector('.dplayer-video, .dplayer-video-current');
+        if (dplayerVideo && dplayerVideo.src) {
+            videoUrl = dplayerVideo.src;
+            if (debug) console.log('策略2成功: 从dplayer-video找到', videoUrl);
+            return videoUrl;
+        }
+
+        // 策略3：在嵌套的iframe中查找
+        const iframes = document.querySelectorAll('iframe');
+        if (debug) console.log(`找到 ${iframes.length} 个iframe`);
+        // 注意：由于跨域限制，直接读取iframe内容可能受限，这里只做简单尝试
+        for (const iframe of iframes) {
+            if (iframe.src && iframe.src.includes('video') || iframe.src.includes('player')) {
+                videoUrl = iframe.src;
+                if (debug) console.log('策略3: 从iframe src找到可能的播放器地址', videoUrl);
+                // 注意：这可能是播放器页面地址，而非直接视频链接
+                break;
+            }
+        }
+
+        // 策略4：从页面script或meta标签中查找可能的视频配置
+        if (!videoUrl) {
+            const scripts = document.querySelectorAll('script');
+            for (const script of scripts) {
+                const content = script.textContent || script.innerHTML;
+                // 查找常见的视频URL模式
+                const urlPatterns = [
+                    /(https?:\/\/[^\s"'<>]+?\.(mp4|m3u8|flv|avi|mov|wmv|mkv|webm))(?=["'&\s])/gi,
+                    /"url"\s*:\s*"([^"]+\.(mp4|m3u8|flv|avi|mov|wmv|mkv|webm))"/i,
+                    /"src"\s*:\s*"([^"]+\.(mp4|m3u8|flv|avi|mov|wmv|mkv|webm))"/i,
+                    /video_url["']?\s*[:=]\s*["']([^"']+\.(mp4|m3u8|flv|avi|mov|wmv|mkv|webm))["']/i
+                ];
+
+                for (const pattern of urlPatterns) {
+                    const match = content.match(pattern);
+                    if (match && match[1]) {
+                        videoUrl = match[1];
+                        if (debug) console.log('策略4成功: 从script找到', videoUrl);
+                        return videoUrl;
+                    }
+                }
+            }
+        }
+
+        // 策略5：最后的尝试 - 在整个文档中搜索URL
+        if (!videoUrl) {
+            const bodyText = document.body.innerHTML;
+            const videoUrlRegex = /(https?:\/\/[^\s"'<>]+?\.(mp4|m3u8|flv|avi|mov|wmv|mkv|webm))(?=["'&\s<>])/gi;
+            const matches = bodyText.match(videoUrlRegex);
+            if (matches && matches.length > 0) {
+                // 过滤掉可能不是直接视频链接的URL（例如图标、样式等）
+                const filtered = matches.filter(url =>
+                    !url.includes('logo') &&
+                    !url.includes('icon') &&
+                    !url.includes('.css') &&
+                    !url.includes('.js')
+                );
+                if (filtered.length > 0) {
+                    videoUrl = filtered[0];
+                    if (debug) console.log('策略5成功: 从全文搜索找到', videoUrl);
+                }
+            }
+        }
+
+        if (debug && !videoUrl) console.log('所有查找策略均未找到视频链接');
+        return videoUrl;
+    }
+
+    // 显示提示消息
+    function showNotification(element, message, type = 'success') {
+        element.textContent = message;
+        element.className = `tucao-copy-notification ${type === 'error' ? 'error' : ''} show`;
+
+        setTimeout(() => {
+            element.classList.remove('show');
+        }, 2000);
+    }
+
+    // 启动脚本
+    // 延迟执行以确保页面元素加载完成
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        // 如果页面已经加载，稍微延迟一下以确保播放器初始化
+        setTimeout(init, 800);
+    }
+})();
